@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+ backend:
+   build: ./glanceid-backend
+   ports:
+     - "3000:3000"
+   env_file:
+     - ./glanceid-backend/.env
+
+ frontend:
+   build: ./glanceid-frontend
+   ports:
+     - "8080:80"
+   depends_on:
+     - backend
