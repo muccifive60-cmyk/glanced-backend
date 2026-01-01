@@ -4,118 +4,117 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// --- NEW IMPORTS FOR BILLING & WEBHOOKS ---
+// Importing the Usage Engine to track costs
+const { incrementUsage } = require('./services/usageEngine');
+// Importing the Vapi Webhook Route
+const vapiWebhookRoute = require('./routes/vapiWebhook');
+
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
 // --- DATABASE CONNECTION ---
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- HEALTH CHECK ---
-app.get('/health', (req, res) => res.json({ status: "Online" }));
+// --- 1. HEALTH CHECK ---
+app.get('/', (req, res) => res.send('GlanceID Server & Payments Online 🟢'));
 
-// --- 1. MARKETPLACE ROUTES ---
-app.get('/api/brokers', async (req, res) => {
-    const { data, error } = await supabase.from('brokers').select('*');
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
-});
-
-app.post('/api/upload-broker', async (req, res) => {
-    const { name, price, category, endpoint } = req.body;
-    const { data, error } = await supabase.from('brokers').insert([
-        { 
-            name, 
-            price: parseFloat(price), 
-            category, 
-            endpoint, 
-            dev: "Verified Developer",
-            rating: 5.0 
-        }
-    ]).select();
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true, data });
-});
-
-// --- 2. VERIFICATION & USAGE (THE CORE LOGIC) ---
-
-// Get Usage (Initial Load)
-app.get('/api/usage/:businessId', async (req, res) => {
-    const { businessId } = req.params;
-    
-    let { data, error } = await supabase
-        .from('api_usage')
-        .select('count')
-        .eq('business_id', businessId)
-        .single();
-
-    // If no record exists, create one starting at 0
-    if (!data) {
-        const { data: newData } = await supabase
-            .from('api_usage')
-            .insert([{ business_id: businessId, count: 0 }])
-            .select()
-            .single();
-        return res.json(newData || { count: 0 });
-    }
-
-    res.json(data);
-});
-
-// Execute Verification (This makes the button work!)
-app.post('/api/verify', async (req, res) => {
-    const { businessId } = req.body;
-
-    // 1. Get current count
-    const { data: current } = await supabase
-        .from('api_usage')
-        .select('count')
-        .eq('business_id', businessId)
-        .single();
-
-    // 2. Increment
-    const newCount = (current ? current.count : 0) + 1;
-
-    // 3. Update Database
-    const { data, error } = await supabase
-        .from('api_usage')
-        .update({ count: newCount })
-        .eq('business_id', businessId)
-        .select();
-    if (error) return res.status(500).json({ error: error.message });
-    
-    // 4. Return success
-    res.json({ success: true, count: newCount });
-});
-
-// --- 3. PASSPORT (Avoids 404 Error) ---
-app.post('/api/create-dpp', async (req, res) => {
-    res.json({ success: true, message: "Passport Created" });
-});
-
-// --- 4. STRIPE PAYMENT ---
+// --- 2. STRIPE PAYMENTS (RESTORED) ---
 app.post('/create-checkout-session', async (req, res) => {
-    try {
-        const session = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
-            line_items: [{
-                price_data: {
-                    currency: 'usd',
-                    product_data: { name: 'GlanceID Pro Plan' },
-                    unit_amount: 2900,
-                },
-                quantity: 1,
-            }],
-            mode: 'payment',
-            success_url: 'http://localhost:5173/success',
-            cancel_url: 'http://localhost:5173/cancel',
-        });
-        res.json({ url: session.url });
-    } catch (e) {
-        // If Stripe fails (keys missing), we return error but handled in frontend
-        res.status(500).json({ error: e.message });
-    }
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: { name: 'GlanceID Pro Plan (Credits)' },
+          unit_amount: 2900, // $29.00
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: 'http://localhost:5173/success', // Redirect after pay
+      cancel_url: 'http://localhost:5173/cancel',
+    });
+    res.json({ url: session.url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
+
+// --- 3. AI MARKETPLACE GATEWAY (NEW ENGINE) ---
+app.post('/v1/chat/completions', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const requestedModel = req.body.model; 
+
+  // A. Validate API Key
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing API Key' });
+  }
+  const apiKey = authHeader.split(' ')[1];
+
+  // B. Check Key in Database
+  const { data: keyData, error: keyError } = await supabase
+    .from('api_keys')
+    .select('*')
+    .eq('key', apiKey)
+    .single();
+
+  if (keyError || !keyData || !keyData.is_active) {
+    return res.status(403).json({ error: 'Invalid or Inactive API Key' });
+  }
+
+  // C. Check Model in Database
+  const { data: modelData, error: modelError } = await supabase
+    .from('ai_models')
+    .select('*')
+    .eq('name', requestedModel)
+    .single();
+
+  if (modelError || !modelData) {
+    return res.status(404).json({ 
+      error: `Model '${requestedModel}' not found in GlanceID Marketplace.` 
+    });
+  }
+
+  // --- NEW: CHARGE FOR USAGE (BILLING) ---
+  try {
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1); 
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); 
+    
+    // Charge 1 unit per message/request
+    await incrementUsage(
+        keyData.user_id, // Get User ID from API Key
+        'chat_messages', // Feature Key for Text
+        periodStart, 
+        periodEnd, 
+        1 // Amount
+    );
+  } catch (billingError) {
+    console.error("Billing Error:", billingError.message);
+    // Optional: Return error if billing fails, or allow it but log error
+    // return res.status(402).json({ error: "Billing Failed" });
+  }
+
+  // D. Success Response (Access Granted)
+  res.json({
+    id: "chatcmpl-" + Date.now(),
+    model: modelData.name,
+    provider: modelData.provider,
+    choices: [{
+      message: {
+        role: "assistant",
+        content: `Connection Established. You are now using ${modelData.name} provided by ${modelData.provider}.`
+      }
+    }]
+  });
+});
+
+// --- NEW: REGISTER VAPI WEBHOOK ---
+// This enables the server to receive call reports from Vapi
+app.use('/webhooks', vapiWebhookRoute);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend RUNNING on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
