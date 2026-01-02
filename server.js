@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -19,11 +18,11 @@ app.use(cors());
 // --- CONFIGURATION ---
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Initialize Gemini with your Hardcoded API Key
+// Initialize Gemini with your Environment Variable (SECURE)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --- 1. HEALTH CHECK ---
-app.get('/', (req, res) => res.send('GlanceID Server (Gemini Powered) Online 🟢'));
+app.get('/', (req, res) => res.send('GlanceID Server (Strict Mode V2) Online 🟢'));
 
 // --- 2. AGENTS SEARCH API ---
 app.get('/agents', async (req, res) => {
@@ -76,7 +75,7 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// --- 4. CHAT API (POWERED BY GEMINI) ---
+// --- 4. CHAT API (POWERED BY GEMINI + INTELLIGENCE LAYER) ---
 app.post('/v1/chat/completions', async (req, res) => {
   const authHeader = req.headers.authorization;
   const { model: requestedModel, messages } = req.body;
@@ -101,41 +100,105 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
   // B. FIND AGENT & INJECT PERSONA
-  let systemInstructionText = "You are a helpful AI assistant.";
+  let systemInstructionText = "";
   
   console.log(`🔍 Requesting Agent: '${requestedModel}'...`);
 
-  // Search for the agent in the database
+  // Search for the agent in the database using .ilike for better matching
+  const cleanName = requestedModel.trim();
   const { data: agentData, error: agentError } = await supabase
     .from('ai_models')
     .select('*')
-    .eq('name', requestedModel)
-    .single();
+    .ilike('name', cleanName) // Using ilike to ignore case sensitivity
+    .maybeSingle(); // Prevents errors if duplicates exist
 
   if (agentData) {
     console.log(`✅ AGENT FOUND: ${agentData.name}`);
+
+    // --- INTELLIGENCE LAYER: AUTO-DETECT CATEGORY ---
+    // This function creates the "Strict Persona" based on keywords in the name
+    function detectCategoryPrompt(name, description) {
+        const textToCheck = (name + " " + description).toLowerCase();
+
+        // 1. CONTRACTING & LEGAL (Matches "US Federal Contracting")
+        if (textToCheck.match(/contract|procurement|bid|federal|compliance|gdpr|regulation|law|attorney/)) {
+          return `
+            IDENTITY: You are a SENIOR FEDERAL CONTRACTING & COMPLIANCE OFFICER.
+            EXPERTISE: Specialized in ${name}.
+            STRICT RULES:
+            1. Base all answers strictly on official regulations (FAR/DFARS) and compliance standards.
+            2. Be professional, authoritative, and precise.
+            3. REJECT strictly: "I am a professional contracting system. I do not create creative content like poems."
+          `;
+        }
+
+        // 2. REAL ESTATE (Matches "NYC Real Estate")
+        if (textToCheck.match(/real estate|property|tenant|landlord|leasing|rent|housing/)) {
+          return `
+            IDENTITY: You are a LICENSED REAL ESTATE EXPERT.
+            EXPERTISE: Specialized in ${name}.
+            STRICT RULES:
+            1. Provide market analysis, valuation, and regulatory advice for real estate.
+            2. Do NOT give financial advice without a disclaimer.
+            3. REJECT non-business queries immediately.
+          `;
+        }
+
+        // 3. CYBERSECURITY & TECH (Matches "Cybersecurity SOC2")
+        if (textToCheck.match(/cybersecurity|soc2|fintech|saas|software|automation|cloud|it support/)) {
+          return `
+            IDENTITY: You are a SENIOR TECHNICAL ARCHITECT & SECURITY ANALYST.
+            EXPERTISE: Specialized in ${name}.
+            STRICT RULES:
+            1. Focus on technical implementation, security protocols (SOC2/ISO), and code.
+            2. Provide step-by-step technical solutions.
+            3. REJECT generic chat. Say: "I handle technical and security operations only."
+          `;
+        }
+
+        // 4. HR & RECRUITMENT
+        if (textToCheck.match(/hr|recruitment|hiring|eeo|employee|staffing/)) {
+          return `
+            IDENTITY: You are a SENIOR HR COMPLIANCE MANAGER.
+            EXPERTISE: Specialized in ${name}.
+            STRICT RULES:
+            1. Follow labor laws and EEO guidelines strictly.
+            2. Maintain a professional, corporate tone.
+            3. REJECT entertainment requests.
+          `;
+        }
+
+        // 5. DEFAULT FALLBACK (Catches everything else)
+        return `
+            IDENTITY: You are an ENTERPRISE AI EXPERT specialized in: "${name}".
+            SOURCE MATERIAL: "${description}".
+            STRICT RULES:
+            1. Solve professional problems related to ${name}.
+            2. Ignore marketing fluff. Focus on the core domain expertise.
+            3. ABSOLUTELY NO poems, jokes, or entertainment.
+        `;
+    }
+
+    // Apply the intelligent prompt
+    systemInstructionText = detectCategoryPrompt(agentData.name, agentData.description);
     
-    // Construct the Strict System Instruction based on DB Description
-    systemInstructionText = `
-      IDENTITY: You are ${agentData.name}.
-      CORE MISSION: ${agentData.description}.
-      
-      STRICT GUIDELINES:
-      1. You must act ONLY within the scope of your mission.
-      2. If asked to do something outside your specific role (like writing poems, jokes, or general chat unrelated to your work), you must REFUSE politely but firmly. State exactly what you do.
-      3. Maintain a professional tone suitable for your role.
-      4. Do not mention you are an AI model; assume the role completely.
-    `;
   } else {
-    console.log("❌ Agent not found in DB. Using Generic AI Persona.");
+    console.log(`❌ Agent '${cleanName}' not found in DB. Blocking request.`);
+    // Fallback: Strict refusal if agent doesn't exist
+    systemInstructionText = `
+      You are a System Administrator.
+      The user requested an agent named '${cleanName}' which is not in our database.
+      Politely inform the user: "Error: Configuration for '${cleanName}' not found. Please contact support."
+      Do NOT answer any other questions.
+    `;
   }
 
   // C. SEND TO GEMINI
   try {
-    // Using Gemini 1.5 Flash for speed and instruction adherence
+    // Using Gemini 1.5 Flash
     const model = genAI.getGenerativeModel({ 
       model: "gemini-1.5-flash",
-      systemInstruction: systemInstructionText // <--- Injecting the specific Persona
+      systemInstruction: systemInstructionText // <--- The "Strict Persona" is injected here
     });
 
     const result = await model.generateContent(userMessage);
@@ -162,7 +225,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       console.error("⚠️ Billing Error (Chat continues):", billingError.message);
     }
 
-    // E. SEND RESPONSE TO FRONTEND (Standard OpenAI Format)
+    // E. SEND RESPONSE TO FRONTEND
     res.json({
       id: "chatcmpl-" + Date.now(),
       model: requestedModel,
