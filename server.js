@@ -1,30 +1,36 @@
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// If you haven't set up Stripe yet, you can comment the line below
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); 
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// --- IMPORTS FOR BILLING & WEBHOOKS ---
-const { incrementUsage } = require('./services/usageEngine');
+// --- OPTIONAL SERVICE IMPORTS ---
+// Uncomment these if you have the files locally
+const { incrementUsage } = require('./services/usageEngine'); 
 const vapiWebhookRoute = require('./routes/vapiWebhook');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// --- DATABASE CONNECTION ---
+// --- CONFIGURATION ---
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// Initialize Gemini with your Hardcoded API Key
+const genAI = new GoogleGenerativeAI("AIzaSyCiU60dLf2oOdjsyJWUrJRjPIAEMopeluw");
+
 // --- 1. HEALTH CHECK ---
-app.get('/', (req, res) => res.send('GlanceID Server & Payments Online 🟢'));
+app.get('/', (req, res) => res.send('GlanceID Server (Gemini Powered) Online 🟢'));
 
 // --- 2. AGENTS SEARCH API ---
-// This fetches agents from 'ai_models' table to show on Frontend
 app.get('/agents', async (req, res) => {
   try {
-    const { query, category, limit = 20 } = req.query;
+    const { query, category, limit = 50 } = req.query;
     
-    // CHANGED: We are now looking at 'ai_models' because that's where your data is
+    // Querying the 'ai_models' table for agents
     let supabaseQuery = supabase
       .from('ai_models') 
       .select('*');
@@ -61,7 +67,7 @@ app.post('/create-checkout-session', async (req, res) => {
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: 'http://localhost:5173/success',
+      success_url: 'http://localhost:5173/success', // Update for production URL
       cancel_url: 'http://localhost:5173/cancel',
     });
     res.json({ url: session.url });
@@ -70,12 +76,15 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// --- 4. AI MARKETPLACE GATEWAY (FIXED FOR ai_models) ---
+// --- 4. CHAT API (POWERED BY GEMINI) ---
 app.post('/v1/chat/completions', async (req, res) => {
   const authHeader = req.headers.authorization;
-  const requestedModel = req.body.model; 
+  const { model: requestedModel, messages } = req.body;
+  
+  // Get the last message from the user
+  const userMessage = messages[messages.length - 1].content;
 
-  // A. Validate API Key
+  // A. Validate User API Key
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing API Key' });
   }
@@ -91,13 +100,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     return res.status(403).json({ error: 'Invalid or Inactive API Key' });
   }
 
-  // B. FIND AGENT & INJECT PERSONA (The Fix)
-  let agentSystemInstruction = "You are a helpful AI assistant.";
-  let providerName = "GlanceID";
+  // B. FIND AGENT & INJECT PERSONA
+  let systemInstructionText = "You are a helpful AI assistant.";
+  
+  console.log(`🔍 Requesting Agent: '${requestedModel}'...`);
 
-  console.log(`🔍 Searching for Agent: '${requestedModel}' in ai_models...`);
-
-  // We look directly in 'ai_models' since your screenshot confirmed the data is there
+  // Search for the agent in the database
   const { data: agentData, error: agentError } = await supabase
     .from('ai_models')
     .select('*')
@@ -105,54 +113,71 @@ app.post('/v1/chat/completions', async (req, res) => {
     .single();
 
   if (agentData) {
-    console.log("✅ AGENT FOUND:", agentData.name);
-    console.log("📝 Description:", agentData.description);
+    console.log(`✅ AGENT FOUND: ${agentData.name}`);
     
-    // HAPA NDIPO UCHAWI ULIPO:
-    // Tunachukua description kwenye DB na kumlazimisha AI aitumie
-    agentSystemInstruction = `IMPORTANT: You are NOT a generic AI. You are ${agentData.name}. 
-    Your Core Mission & Persona: ${agentData.description}. 
-    RULES:
-    1. Strictly follow this persona. 
-    2. If asked to do something outside your mission (like writing poems or jokes), REFUSE politely and state your professional purpose.
-    3. Use a tone appropriate for your role.`;
-    
-    providerName = agentData.provider || "Vapi";
+    // Construct the Strict System Instruction based on DB Description
+    systemInstructionText = `
+      IDENTITY: You are ${agentData.name}.
+      CORE MISSION: ${agentData.description}.
+      
+      STRICT GUIDELINES:
+      1. You must act ONLY within the scope of your mission.
+      2. If asked to do something outside your specific role (like writing poems, jokes, or general chat unrelated to your work), you must REFUSE politely but firmly. State exactly what you do.
+      3. Maintain a professional tone suitable for your role.
+      4. Do not mention you are an AI model; assume the role completely.
+    `;
   } else {
-    console.log("❌ Agent not found in DB. Using Generic Persona.");
+    console.log("❌ Agent not found in DB. Using Generic AI Persona.");
   }
 
-  // C. Charge for Usage
+  // C. SEND TO GEMINI
   try {
-    const now = new Date();
-    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1); 
-    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); 
-    
-    await incrementUsage(
-        keyData.user_id,
-        'chat_messages',
-        periodStart, 
-        periodEnd, 
-        1 
-    );
-  } catch (billingError) {
-    console.error("Billing Error:", billingError.message);
-  }
+    // Using Gemini 1.5 Flash for speed and instruction adherence
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      systemInstruction: systemInstructionText // <--- Injecting the specific Persona
+    });
 
-  // D. Success Response
-  res.json({
-    id: "chatcmpl-" + Date.now(),
-    model: requestedModel,
-    provider: providerName,
-    choices: [{
-      message: {
-        role: "assistant",
-        // Kumbuka: Hapa tunatuma jibu feki la haraka ili kutest connection.
-        // Kwenye Production, hapa ndipo utapoita Gemini API na kumtumia 'agentSystemInstruction'
-        content: `[System: Persona Active for ${requestedModel}]\n\nHello. I am ready to operate based on my protocols: ${agentData ? agentData.description : 'Standard AI'}. How may I assist with my specific expertise?`
+    const result = await model.generateContent(userMessage);
+    const response = await result.response;
+    const aiReplyText = response.text();
+
+    // D. UPDATE BILLING (Record Usage)
+    try {
+      const now = new Date();
+      const periodStart = new Date(now.getFullYear(), now.getMonth(), 1); 
+      const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); 
+      
+      // Increment usage if the engine is available
+      if (incrementUsage) {
+          await incrementUsage(
+              keyData.user_id,
+              'chat_messages',
+              periodStart, 
+              periodEnd, 
+              1 
+          );
       }
-    }]
-  });
+    } catch (billingError) {
+      console.error("⚠️ Billing Error (Chat continues):", billingError.message);
+    }
+
+    // E. SEND RESPONSE TO FRONTEND (Standard OpenAI Format)
+    res.json({
+      id: "chatcmpl-" + Date.now(),
+      model: requestedModel,
+      choices: [{
+        message: {
+          role: "assistant",
+          content: aiReplyText
+        }
+      }]
+    });
+
+  } catch (aiError) {
+    console.error("🔴 Gemini API Error:", aiError);
+    res.status(500).json({ error: "Failed to process request with Gemini AI." });
+  }
 });
 
 // --- 5. REGISTER VAPI WEBHOOK ---
@@ -160,4 +185,3 @@ app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
