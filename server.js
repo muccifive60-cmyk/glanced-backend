@@ -20,7 +20,7 @@ app.use(cors());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // Initialize Gemini with your Hardcoded API Key
-const genAI = new GoogleGenerativeAI("AIzaSyCiU60dLf2oOdjsyJWUrJRjPIAEMopeluw");
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --- 1. HEALTH CHECK ---
 app.get('/', (req, res) => res.send('GlanceID Server (Gemini Powered) Online 🟢'));
