@@ -114,7 +114,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 // --- NEW: REGISTER VAPI WEBHOOK ---
 // This enables the server to receive call reports from Vapi
-app.use('/webhooks', vapiWebhookRoute);
+app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
