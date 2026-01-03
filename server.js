@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const fetch = require('node-fetch'); // Replaces @google/generative-ai for stability
+const axios = require('axios'); 
 
 // OPTIONAL IMPORTS (Usage Engine)
 let incrementUsage;
@@ -124,7 +124,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     // 2. AGENT LOOKUP
-    // If no model is specified, default to a generic name to prevent errors
     const targetModelName = requestedModel ? requestedModel.trim() : 'General Assistant';
     
     const { data: agent } = await supabase
@@ -133,7 +132,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       .ilike('name', targetModelName)
       .maybeSingle();
 
-    // Fallback system prompt if agent is not found or has no prompt
     const systemPrompt =
       agent?.system_prompt ||
       `
@@ -147,35 +145,18 @@ RULES:
 
     const userMessage = messages[messages.length - 1].content;
 
-    // 3. GEMINI REQUEST (RAW HTTP FETCH)
-    // We combine System Prompt + User Message to avoid SDK errors
+    // 3. GEMINI REQUEST (AXIOS)
     const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
-
-    const geminiPayload = {
-      contents: [{
-        parts: [{ text: combinedPrompt }]
-      }]
-    };
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-    const googleResponse = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiPayload)
+    const googleResponse = await axios.post(geminiUrl, {
+      contents: [{
+        parts: [{ text: combinedPrompt }]
+      }]
     });
 
-    const googleData = await googleResponse.json();
-
-    if (!googleResponse.ok) {
-      console.error("Google Gemini Error:", JSON.stringify(googleData, null, 2));
-      return res.status(500).json({ 
-        error: "Gemini processing failed", 
-        details: googleData 
-      });
-    }
-
-    const aiReplyText = googleData.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated";
+    const aiReplyText = googleResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated";
 
     // 4. USAGE TRACKING
     if (incrementUsage) {
@@ -212,8 +193,9 @@ RULES:
     });
 
   } catch (err) {
-    console.error('Server error:', err);
-    res.status(500).json({ error: 'Internal Server Error', details: err.message });
+    const errorDetail = err.response?.data || err.message;
+    console.error('Gemini error:', errorDetail);
+    res.status(500).json({ error: 'Gemini processing failed', details: errorDetail });
   }
 });
 
