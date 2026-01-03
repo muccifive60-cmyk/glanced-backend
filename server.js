@@ -18,7 +18,7 @@ app.use(cors());
 // --------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
+  process.env.SUPABASE_KEY // MUST be SERVICE ROLE KEY
 );
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -95,31 +95,35 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(401).json({ error: 'Missing API key' });
     }
 
-    const apiKey = authHeader.split(' ')[1];
+    const apiKey = authHeader.replace('Bearer ', '').trim();
 
-    // Validate API key
+    // Validate API key (RLS-safe)
     const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
-      .select('*')
+      .select('id,user_id,is_active')
       .eq('key', apiKey)
-      .eq('is_active', true)
       .single();
 
-    if (keyError || !keyData) {
+    if (keyError || !keyData || !keyData.is_active) {
       return res.status(403).json({ error: 'Invalid or inactive API key' });
     }
 
     // Get agent
     const { data: agent } = await supabase
       .from('ai_models')
-      .select('*')
+      .select('name,description,system_prompt')
       .ilike('name', requestedModel.trim())
       .maybeSingle();
 
-    let systemPrompt = '';
+    if (!agent) {
+      return res.status(404).json({
+        error: `Agent '${requestedModel}' not found`,
+      });
+    }
 
-    if (agent) {
-      systemPrompt = `
+    const systemPrompt =
+      agent.system_prompt ||
+      `
 IDENTITY: You are a professional enterprise AI agent.
 SPECIALIZATION: ${agent.name}
 DESCRIPTION: ${agent.description}
@@ -128,35 +132,18 @@ RULES:
 - Answer only within your specialization
 - No poems, jokes, or casual chat
 - Be concise, technical, and authoritative
-      `;
-    } else {
-      systemPrompt = `
-You are a system guard.
-The requested agent "${requestedModel}" does not exist.
-Respond with an error message only.
-      `;
-    }
+      `.trim();
 
     const userMessage = messages[messages.length - 1].content;
 
-    // ------------------ GEMINI FIX (ONLY CHANGE) ------------------
+    // ------------------ GEMINI (PRODUCTION FIX) ------------------
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-flash',
+      systemInstruction: systemPrompt,
     });
 
-    const result = await model.generateContent([
-      {
-        role: 'system',
-        parts: [{ text: systemPrompt }],
-      },
-      {
-        role: 'user',
-        parts: [{ text: userMessage }],
-      },
-    ]);
-
-    const response = await result.response;
-    const aiReplyText = response.text();
+    const result = await model.generateContent(userMessage);
+    const aiReplyText = result.response.text();
     // -------------------------------------------------------------
 
     // Usage tracking
@@ -179,7 +166,7 @@ Respond with an error message only.
 
     res.json({
       id: 'chatcmpl-' + Date.now(),
-      model: requestedModel,
+      model: agent.name,
       choices: [
         {
           message: {
