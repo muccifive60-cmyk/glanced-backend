@@ -95,7 +95,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (FIXED GEMINI LOGIC)
+// CHAT COMPLETIONS (FIXED GEMINI URL)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -145,10 +145,11 @@ RULES:
 
     const userMessage = messages[messages.length - 1].content;
 
-    // 3. GEMINI REQUEST (AXIOS)
+    // 3. GEMINI REQUEST (FIXED URL)
     const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    // FIXED: Changed v1beta to v1 and used the stable endpoint format
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const googleResponse = await axios.post(geminiUrl, {
       contents: [{
