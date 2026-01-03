@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const axios = require('axios'); 
+const axios = require('axios');
 
 // OPTIONAL IMPORTS (Usage Engine)
 let incrementUsage;
@@ -25,16 +25,14 @@ app.use(cors());
 // CONFIGURATION & CHECKS
 // --------------------------------------------------
 if (!process.env.GEMINI_API_KEY) {
-  console.error("CRITICAL ERROR: GEMINI_API_KEY is missing in Environment Variables.");
+  console.error('CRITICAL ERROR: GEMINI_API_KEY is missing in Environment Variables.');
 }
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY, // Must be Service Role Key
+  process.env.SUPABASE_KEY,
   {
-    auth: {
-      persistSession: false,
-    },
+    auth: { persistSession: false },
   }
 );
 
@@ -53,7 +51,6 @@ app.get('/agents', async (req, res) => {
     const { query, category, limit = 50 } = req.query;
 
     let q = supabase.from('ai_models').select('*');
-
     if (query) q = q.ilike('name', `%${query}%`);
     if (category) q = q.eq('category', category);
 
@@ -95,7 +92,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (FIXED GEMINI URL)
+// CHAT COMPLETIONS (GEMINI-PRO FIX)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -112,7 +109,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const apiKey = authHeader.replace('Bearer ', '').trim();
 
-    // 1. API KEY VALIDATION (SUPABASE)
+    // 1. API KEY VALIDATION
     const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
       .select('id,user_id,is_active')
@@ -125,7 +122,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     // 2. AGENT LOOKUP
     const targetModelName = requestedModel ? requestedModel.trim() : 'General Assistant';
-    
+
     const { data: agent } = await supabase
       .from('ai_models')
       .select('name,description,system_prompt')
@@ -145,19 +142,23 @@ RULES:
 
     const userMessage = messages[messages.length - 1].content;
 
-    // 3. GEMINI REQUEST (FIXED URL)
+    // 3. GEMINI REQUEST (ONLY LINE CHANGED)
     const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
 
-    // FIXED: Changed v1beta to v1 and used the stable endpoint format
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const geminiUrl =
+      `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const googleResponse = await axios.post(geminiUrl, {
-      contents: [{
-        parts: [{ text: combinedPrompt }]
-      }]
+      contents: [
+        {
+          parts: [{ text: combinedPrompt }],
+        },
+      ],
     });
 
-    const aiReplyText = googleResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated";
+    const aiReplyText =
+      googleResponse.data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      'No response generated';
 
     // 4. USAGE TRACKING
     if (incrementUsage) {
@@ -192,7 +193,6 @@ RULES:
         },
       ],
     });
-
   } catch (err) {
     const errorDetail = err.response?.data || err.message;
     console.error('Gemini error:', errorDetail);
@@ -204,7 +204,7 @@ RULES:
 // VAPI WEBHOOK
 // --------------------------------------------------
 if (vapiWebhookRoute) {
-    app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
+  app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
 }
 
 // --------------------------------------------------
