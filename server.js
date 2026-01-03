@@ -92,9 +92,9 @@ app.post("/v1/chat/completions", async (req, res) => {
       .eq("key", apiKey)
       .single();
 
-    if (!keyData || !keyData.is_active) {
-      return res.status(403).json({ error: "Invalid or inactive API key" });
-    }
+    if (keyError || !keyData) {
+  return res.status(403).json({ error: 'Invalid API Key' });
+}
 
     const userMessage = messages[messages.length - 1].content;
     const cleanName = requestedModel.trim();
