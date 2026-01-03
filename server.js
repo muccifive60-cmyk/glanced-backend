@@ -28,6 +28,10 @@ if (!process.env.GEMINI_API_KEY) {
   console.error('CRITICAL ERROR: GEMINI_API_KEY is missing in Environment Variables.');
 }
 
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+  console.error('CRITICAL ERROR: Supabase credentials are missing.');
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY,
@@ -51,6 +55,7 @@ app.get('/agents', async (req, res) => {
     const { query, category, limit = 50 } = req.query;
 
     let q = supabase.from('ai_models').select('*');
+
     if (query) q = q.ilike('name', `%${query}%`);
     if (category) q = q.eq('category', category);
 
@@ -92,7 +97,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI 3 FLASH – FIXED)
+// CHAT COMPLETIONS (GEMINI 3 FLASH – CORRECTED)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -142,22 +147,36 @@ RULES:
 
     const userMessage = messages[messages.length - 1].content;
 
-    // 3. GEMINI REQUEST (ONLY THIS LINE CHANGED)
-    const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
+    // 3. GEMINI REQUEST (FIXED PAYLOAD)
+    const combinedPrompt =
+      `[SYSTEM INSTRUCTION]\n${systemPrompt}\n\n[USER MESSAGE]\n${userMessage}`;
 
     const geminiUrl =
       `https://generativelanguage.googleapis.com/v1/models/gemini-3-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-    const googleResponse = await axios.post(geminiUrl, {
-      contents: [
-        {
-          parts: [{ text: combinedPrompt }],
+    const googleResponse = await axios.post(
+      geminiUrl,
+      {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: combinedPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens: 1024,
         },
-      ],
-    });
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
     const aiReplyText =
-      googleResponse.data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      googleResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       'No response generated';
 
     // 4. USAGE TRACKING
@@ -178,7 +197,7 @@ RULES:
       }
     }
 
-    // 5. RESPONSE
+    // 5. RESPONSE (OPENAI-COMPATIBLE)
     res.json({
       id: 'chatcmpl-' + Date.now(),
       object: 'chat.completion',
@@ -190,13 +209,17 @@ RULES:
             role: 'assistant',
             content: aiReplyText,
           },
+          finish_reason: 'stop',
         },
       ],
     });
   } catch (err) {
     const errorDetail = err.response?.data || err.message;
     console.error('Gemini error:', errorDetail);
-    res.status(500).json({ error: 'Gemini processing failed', details: errorDetail });
+    res.status(500).json({
+      error: 'Gemini processing failed',
+      details: errorDetail,
+    });
   }
 });
 
