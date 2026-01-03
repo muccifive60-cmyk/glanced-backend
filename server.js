@@ -97,7 +97,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI 3 FLASH – CORRECTED)
+// CHAT COMPLETIONS (GEMINI 1.5 FLASH – PRODUCTION SAFE)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -114,7 +114,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const apiKey = authHeader.replace('Bearer ', '').trim();
 
+    // --------------------------------------------------
     // 1. API KEY VALIDATION
+    // --------------------------------------------------
     const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
       .select('id,user_id,is_active')
@@ -125,8 +127,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(403).json({ error: 'Invalid or inactive API key' });
     }
 
-    // 2. AGENT LOOKUP
-    const targetModelName = requestedModel ? requestedModel.trim() : 'General Assistant';
+    // --------------------------------------------------
+    // 2. AGENT LOOKUP (UNCHANGED)
+    // --------------------------------------------------
+    const targetModelName =
+      typeof requestedModel === 'string' && requestedModel.trim()
+        ? requestedModel.trim()
+        : 'General Assistant';
 
     const { data: agent } = await supabase
       .from('ai_models')
@@ -143,16 +150,22 @@ DESCRIPTION: ${agent?.description || 'General Assistant'}
 RULES:
 - Answer only within your specialization
 - Be precise, technical, and professional
-`.trim();
+      `.trim();
 
-    const userMessage = messages[messages.length - 1].content;
+    const userMessage = messages[messages.length - 1]?.content || '';
 
-    // 3. GEMINI REQUEST (FIXED PAYLOAD)
+    // --------------------------------------------------
+    // 3. GEMINI REQUEST (ONLY MODEL CHANGED)
+// --------------------------------------------------
     const combinedPrompt =
-      `[SYSTEM INSTRUCTION]\n${systemPrompt}\n\n[USER MESSAGE]\n${userMessage}`;
+`[SYSTEM INSTRUCTION]
+${systemPrompt}
+
+[USER MESSAGE]
+${userMessage}`;
 
     const geminiUrl =
-      `https://generativelanguage.googleapis.com/v1/models/gemini-3-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const googleResponse = await axios.post(
       geminiUrl,
@@ -169,9 +182,7 @@ RULES:
         },
       },
       {
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
       }
     );
 
@@ -179,7 +190,9 @@ RULES:
       googleResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       'No response generated';
 
-    // 4. USAGE TRACKING
+    // --------------------------------------------------
+    // 4. USAGE TRACKING (UNCHANGED)
+    // --------------------------------------------------
     if (incrementUsage) {
       try {
         const now = new Date();
@@ -197,11 +210,13 @@ RULES:
       }
     }
 
-    // 5. RESPONSE (OPENAI-COMPATIBLE)
+    // --------------------------------------------------
+    // 5. OPENAI-COMPATIBLE RESPONSE
+    // --------------------------------------------------
     res.json({
       id: 'chatcmpl-' + Date.now(),
       object: 'chat.completion',
-      model: agent?.name || requestedModel,
+      model: agent?.name || targetModelName,
       choices: [
         {
           index: 0,
