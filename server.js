@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const axios = require('axios');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // OPTIONAL IMPORTS (Usage Engine)
 let incrementUsage;
@@ -97,7 +97,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI 1.5 FLASH – PRODUCTION SAFE)
+// CHAT COMPLETIONS (GEMINI SDK – STABLE)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -128,7 +128,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     // --------------------------------------------------
-    // 2. AGENT LOOKUP (UNCHANGED)
+    // 2. AGENT LOOKUP
     // --------------------------------------------------
     const targetModelName =
       typeof requestedModel === 'string' && requestedModel.trim()
@@ -155,43 +155,27 @@ RULES:
     const userMessage = messages[messages.length - 1]?.content || '';
 
     // --------------------------------------------------
-    // 3. GEMINI REQUEST (ONLY MODEL CHANGED)
-// --------------------------------------------------
-    const combinedPrompt =
-`[SYSTEM INSTRUCTION]
+    // 3. GEMINI SDK CALL (FIXED & WORKING)
+    // --------------------------------------------------
+    const combinedPrompt = `[SYSTEM INSTRUCTION]
 ${systemPrompt}
 
 [USER MESSAGE]
 ${userMessage}`;
 
-    const geminiUrl =
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-    const googleResponse = await axios.post(
-      geminiUrl,
-      {
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: combinedPrompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 1024,
-        },
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash',
+    });
+
+    const result = await model.generateContent(combinedPrompt);
 
     const aiReplyText =
-      googleResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'No response generated';
+      result?.response?.text() || 'No response generated';
 
     // --------------------------------------------------
-    // 4. USAGE TRACKING (UNCHANGED)
+    // 4. USAGE TRACKING
     // --------------------------------------------------
     if (incrementUsage) {
       try {
@@ -229,11 +213,10 @@ ${userMessage}`;
       ],
     });
   } catch (err) {
-    const errorDetail = err.response?.data || err.message;
-    console.error('Gemini error:', errorDetail);
+    console.error('Gemini error:', err.message);
     res.status(500).json({
       error: 'Gemini processing failed',
-      details: errorDetail,
+      details: err.message,
     });
   }
 });
