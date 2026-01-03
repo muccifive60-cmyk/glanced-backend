@@ -25,7 +25,7 @@ app.use(cors());
 // CONFIGURATION & CHECKS
 // --------------------------------------------------
 if (!process.env.GEMINI_API_KEY) {
-  console.error('CRITICAL ERROR: GEMINI_API_KEY is missing in Environment Variables.');
+  console.error('CRITICAL ERROR: GEMINI_API_KEY is missing.');
 }
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
@@ -35,10 +35,14 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY,
-  {
-    auth: { persistSession: false },
-  }
+  { auth: { persistSession: false } }
 );
+
+// Gemini SDK (STABLE)
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const geminiModel = genAI.getGenerativeModel({
+  model: 'gemini-pro',
+});
 
 // --------------------------------------------------
 // HEALTH CHECK
@@ -55,7 +59,6 @@ app.get('/agents', async (req, res) => {
     const { query, category, limit = 50 } = req.query;
 
     let q = supabase.from('ai_models').select('*');
-
     if (query) q = q.ilike('name', `%${query}%`);
     if (category) q = q.eq('category', category);
 
@@ -97,7 +100,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI SDK – STABLE)
+// CHAT COMPLETIONS (STABLE GEMINI-PRO)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -150,29 +153,23 @@ DESCRIPTION: ${agent?.description || 'General Assistant'}
 RULES:
 - Answer only within your specialization
 - Be precise, technical, and professional
-      `.trim();
+`.trim();
 
     const userMessage = messages[messages.length - 1]?.content || '';
 
     // --------------------------------------------------
-    // 3. GEMINI SDK CALL (FIXED & WORKING)
+    // 3. GEMINI PROMPT (CORRECT FORMAT)
     // --------------------------------------------------
-    const combinedPrompt = `[SYSTEM INSTRUCTION]
+    const combinedPrompt = `
+[SYSTEM]
 ${systemPrompt}
 
-[USER MESSAGE]
-${userMessage}`;
+[USER]
+${userMessage}
+`.trim();
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-    });
-
-    const result = await model.generateContent(combinedPrompt);
-
-    const aiReplyText =
-      result?.response?.text() || 'No response generated';
+    const result = await geminiModel.generateContent(combinedPrompt);
+    const aiReplyText = result.response.text();
 
     // --------------------------------------------------
     // 4. USAGE TRACKING
@@ -213,7 +210,7 @@ ${userMessage}`;
       ],
     });
   } catch (err) {
-    console.error('Gemini error:', err.message);
+    console.error('Gemini error:', err);
     res.status(500).json({
       error: 'Gemini processing failed',
       details: err.message,
