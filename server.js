@@ -92,7 +92,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI-PRO FIX)
+// CHAT COMPLETIONS (GEMINI 3 FLASH – FIXED)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -142,11 +142,11 @@ RULES:
 
     const userMessage = messages[messages.length - 1].content;
 
-    // 3. GEMINI REQUEST (ONLY LINE CHANGED)
+    // 3. GEMINI REQUEST (ONLY THIS LINE CHANGED)
     const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
 
     const geminiUrl =
-      `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
+      `https://generativelanguage.googleapis.com/v1/models/gemini-3-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const googleResponse = await axios.post(geminiUrl, {
       contents: [
