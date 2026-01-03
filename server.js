@@ -6,7 +6,11 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // OPTIONAL IMPORTS (already in your project)
-const { incrementUsage } = require('./services/usageEngine');
+let incrementUsage;
+try {
+  ({ incrementUsage } = require('./services/usageEngine'));
+} catch (_) {}
+
 const vapiWebhookRoute = require('./routes/vapiWebhook');
 
 const app = express();
@@ -18,7 +22,12 @@ app.use(cors());
 // --------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY // MUST be SERVICE ROLE KEY
+  process.env.SUPABASE_KEY, // MUST be SERVICE ROLE KEY
+  {
+    auth: {
+      persistSession: false,
+    },
+  }
 );
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -97,18 +106,22 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const apiKey = authHeader.replace('Bearer ', '').trim();
 
-    // Validate API key (RLS-safe)
+    // --------------------------------------------------
+    // API KEY VALIDATION
+    // --------------------------------------------------
     const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
       .select('id,user_id,is_active')
       .eq('key', apiKey)
       .single();
 
-    if (keyError || !keyData || !keyData.is_active) {
+    if (keyError || !keyData || keyData.is_active !== true) {
       return res.status(403).json({ error: 'Invalid or inactive API key' });
     }
 
-    // Get agent
+    // --------------------------------------------------
+    // AGENT LOOKUP
+    // --------------------------------------------------
     const { data: agent } = await supabase
       .from('ai_models')
       .select('name,description,system_prompt')
@@ -124,31 +137,35 @@ app.post('/v1/chat/completions', async (req, res) => {
     const systemPrompt =
       agent.system_prompt ||
       `
-IDENTITY: You are a professional enterprise AI agent.
+IDENTITY: Enterprise AI Agent
 SPECIALIZATION: ${agent.name}
 DESCRIPTION: ${agent.description}
 
 RULES:
 - Answer only within your specialization
-- No poems, jokes, or casual chat
-- Be concise, technical, and authoritative
-      `.trim();
+- No jokes, poems, or casual tone
+- Be precise, technical, and professional
+`.trim();
 
     const userMessage = messages[messages.length - 1].content;
 
-    // ------------------ GEMINI (PRODUCTION FIX) ------------------
+    // --------------------------------------------------
+    // GEMINI CALL (STABLE)
+    // --------------------------------------------------
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-flash',
       systemInstruction: systemPrompt,
     });
 
     const result = await model.generateContent(userMessage);
-    const aiReplyText = result.response.text();
-    // -------------------------------------------------------------
+    const aiReplyText =
+      result?.response?.text?.() || 'No response generated';
 
-    // Usage tracking
-    try {
-      if (incrementUsage) {
+    // --------------------------------------------------
+    // USAGE TRACKING
+    // --------------------------------------------------
+    if (incrementUsage) {
+      try {
         const now = new Date();
         const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
         const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -159,16 +176,21 @@ RULES:
           periodStart,
           periodEnd
         );
+      } catch (usageErr) {
+        console.error('Usage tracking failed:', usageErr.message);
       }
-    } catch (usageErr) {
-      console.error('Usage tracking failed:', usageErr.message);
     }
 
+    // --------------------------------------------------
+    // RESPONSE (OpenAI Compatible)
+    // --------------------------------------------------
     res.json({
       id: 'chatcmpl-' + Date.now(),
+      object: 'chat.completion',
       model: agent.name,
       choices: [
         {
+          index: 0,
           message: {
             role: 'assistant',
             content: aiReplyText,
