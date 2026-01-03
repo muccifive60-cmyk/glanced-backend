@@ -3,34 +3,40 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fetch = require('node-fetch'); // Replaces @google/generative-ai for stability
 
-// OPTIONAL IMPORTS (already in your project)
+// OPTIONAL IMPORTS (Usage Engine)
 let incrementUsage;
 try {
   ({ incrementUsage } = require('./services/usageEngine'));
 } catch (_) {}
 
-const vapiWebhookRoute = require('./routes/vapiWebhook');
+// OPTIONAL IMPORTS (Vapi)
+let vapiWebhookRoute;
+try {
+  vapiWebhookRoute = require('./routes/vapiWebhook');
+} catch (_) {}
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 // --------------------------------------------------
-// CONFIGURATION
+// CONFIGURATION & CHECKS
 // --------------------------------------------------
+if (!process.env.GEMINI_API_KEY) {
+  console.error("CRITICAL ERROR: GEMINI_API_KEY is missing in Environment Variables.");
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY, // MUST be SERVICE ROLE KEY
+  process.env.SUPABASE_KEY, // Must be Service Role Key
   {
     auth: {
       persistSession: false,
     },
   }
 );
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --------------------------------------------------
 // HEALTH CHECK
@@ -89,7 +95,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (GEMINI)
+// CHAT COMPLETIONS (FIXED GEMINI LOGIC)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
@@ -106,9 +112,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const apiKey = authHeader.replace('Bearer ', '').trim();
 
-    // --------------------------------------------------
-    // API KEY VALIDATION
-    // --------------------------------------------------
+    // 1. API KEY VALIDATION (SUPABASE)
     const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
       .select('id,user_id,is_active')
@@ -119,51 +123,61 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(403).json({ error: 'Invalid or inactive API key' });
     }
 
-    // --------------------------------------------------
-    // AGENT LOOKUP
-    // --------------------------------------------------
+    // 2. AGENT LOOKUP
+    // If no model is specified, default to a generic name to prevent errors
+    const targetModelName = requestedModel ? requestedModel.trim() : 'General Assistant';
+    
     const { data: agent } = await supabase
       .from('ai_models')
       .select('name,description,system_prompt')
-      .ilike('name', requestedModel.trim())
+      .ilike('name', targetModelName)
       .maybeSingle();
 
-    if (!agent) {
-      return res.status(404).json({
-        error: `Agent '${requestedModel}' not found`,
-      });
-    }
-
+    // Fallback system prompt if agent is not found or has no prompt
     const systemPrompt =
-      agent.system_prompt ||
+      agent?.system_prompt ||
       `
 IDENTITY: Enterprise AI Agent
-SPECIALIZATION: ${agent.name}
-DESCRIPTION: ${agent.description}
-
+SPECIALIZATION: ${targetModelName}
+DESCRIPTION: ${agent?.description || 'General Assistant'}
 RULES:
 - Answer only within your specialization
-- No jokes, poems, or casual tone
 - Be precise, technical, and professional
 `.trim();
 
     const userMessage = messages[messages.length - 1].content;
 
-    // --------------------------------------------------
-    // GEMINI CALL (STABLE)
-    // --------------------------------------------------
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      systemInstruction: systemPrompt,
+    // 3. GEMINI REQUEST (RAW HTTP FETCH)
+    // We combine System Prompt + User Message to avoid SDK errors
+    const combinedPrompt = `[SYSTEM INSTRUCTION]: ${systemPrompt}\n\n[USER MESSAGE]: ${userMessage}`;
+
+    const geminiPayload = {
+      contents: [{
+        parts: [{ text: combinedPrompt }]
+      }]
+    };
+
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+    const googleResponse = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(geminiPayload)
     });
 
-    const result = await model.generateContent(userMessage);
-    const aiReplyText =
-      result?.response?.text?.() || 'No response generated';
+    const googleData = await googleResponse.json();
 
-    // --------------------------------------------------
-    // USAGE TRACKING
-    // --------------------------------------------------
+    if (!googleResponse.ok) {
+      console.error("Google Gemini Error:", JSON.stringify(googleData, null, 2));
+      return res.status(500).json({ 
+        error: "Gemini processing failed", 
+        details: googleData 
+      });
+    }
+
+    const aiReplyText = googleData.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated";
+
+    // 4. USAGE TRACKING
     if (incrementUsage) {
       try {
         const now = new Date();
@@ -181,13 +195,11 @@ RULES:
       }
     }
 
-    // --------------------------------------------------
-    // RESPONSE (OpenAI Compatible)
-    // --------------------------------------------------
+    // 5. RESPONSE
     res.json({
       id: 'chatcmpl-' + Date.now(),
       object: 'chat.completion',
-      model: agent.name,
+      model: agent?.name || requestedModel,
       choices: [
         {
           index: 0,
@@ -198,16 +210,19 @@ RULES:
         },
       ],
     });
+
   } catch (err) {
-    console.error('Gemini error:', err);
-    res.status(500).json({ error: 'Gemini processing failed' });
+    console.error('Server error:', err);
+    res.status(500).json({ error: 'Internal Server Error', details: err.message });
   }
 });
 
 // --------------------------------------------------
 // VAPI WEBHOOK
 // --------------------------------------------------
-app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
+if (vapiWebhookRoute) {
+    app.use('/webhooks', vapiWebhookRoute.default || vapiWebhookRoute);
+}
 
 // --------------------------------------------------
 // START SERVER
