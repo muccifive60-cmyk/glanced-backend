@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const axios = require('axios');
 
 // OPTIONAL IMPORTS (Usage Engine)
 let incrementUsage;
@@ -22,27 +22,13 @@ app.use(express.json());
 app.use(cors());
 
 // --------------------------------------------------
-// CONFIGURATION & CHECKS
+// CONFIGURATION
 // --------------------------------------------------
-if (!process.env.GEMINI_API_KEY) {
-  console.error('CRITICAL ERROR: GEMINI_API_KEY is missing.');
-}
-
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
-  console.error('CRITICAL ERROR: Supabase credentials are missing.');
-}
-
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY,
   { auth: { persistSession: false } }
 );
-
-// Gemini SDK (STABLE)
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const geminiModel = genAI.getGenerativeModel({
-  model: 'gemini-pro',
-});
 
 // --------------------------------------------------
 // HEALTH CHECK
@@ -78,16 +64,14 @@ app.post('/create-checkout-session', async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'GlanceID Pro Credits' },
-            unit_amount: 2900,
-          },
-          quantity: 1,
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: { name: 'GlanceID Pro Credits' },
+          unit_amount: 2900,
         },
-      ],
+        quantity: 1,
+      }],
       mode: 'payment',
       success_url: 'https://glanceid-frontend.vercel.app/success',
       cancel_url: 'https://glanceid-frontend.vercel.app/cancel',
@@ -100,43 +84,34 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // --------------------------------------------------
-// CHAT COMPLETIONS (STABLE GEMINI-PRO)
+// CHAT COMPLETIONS (GEMINI – FIXED)
 // --------------------------------------------------
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     const { model: requestedModel, messages } = req.body;
 
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'Invalid messages format' });
-    }
-
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Missing API key' });
     }
 
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'Invalid messages format' });
+    }
+
     const apiKey = authHeader.replace('Bearer ', '').trim();
 
-    // --------------------------------------------------
-    // 1. API KEY VALIDATION
-    // --------------------------------------------------
-    const { data: keyData, error: keyError } = await supabase
+    const { data: keyData } = await supabase
       .from('api_keys')
-      .select('id,user_id,is_active')
+      .select('user_id,is_active')
       .eq('key', apiKey)
       .single();
 
-    if (keyError || !keyData || keyData.is_active !== true) {
+    if (!keyData || keyData.is_active !== true) {
       return res.status(403).json({ error: 'Invalid or inactive API key' });
     }
 
-    // --------------------------------------------------
-    // 2. AGENT LOOKUP
-    // --------------------------------------------------
-    const targetModelName =
-      typeof requestedModel === 'string' && requestedModel.trim()
-        ? requestedModel.trim()
-        : 'General Assistant';
+    const targetModelName = requestedModel?.trim() || 'General Assistant';
 
     const { data: agent } = await supabase
       .from('ai_models')
@@ -144,77 +119,51 @@ app.post('/v1/chat/completions', async (req, res) => {
       .ilike('name', targetModelName)
       .maybeSingle();
 
-    const systemPrompt =
-      agent?.system_prompt ||
-      `
-IDENTITY: Enterprise AI Agent
-SPECIALIZATION: ${targetModelName}
-DESCRIPTION: ${agent?.description || 'General Assistant'}
-RULES:
-- Answer only within your specialization
-- Be precise, technical, and professional
-`.trim();
+    const systemPrompt = agent?.system_prompt || `You are ${targetModelName}`;
+    const userMessage = messages[messages.length - 1].content;
 
-    const userMessage = messages[messages.length - 1]?.content || '';
+    const combinedPrompt = `${systemPrompt}\n\nUser: ${userMessage}`;
 
-    // --------------------------------------------------
-    // 3. GEMINI PROMPT (CORRECT FORMAT)
-    // --------------------------------------------------
-    const combinedPrompt = `
-[SYSTEM]
-${systemPrompt}
+    // ✅ CORRECT GEMINI ENDPOINT
+    const geminiUrl =
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-[USER]
-${userMessage}
-`.trim();
+    const googleResponse = await axios.post(geminiUrl, {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: combinedPrompt }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.4,
+        maxOutputTokens: 1024,
+      },
+    });
 
-    const result = await geminiModel.generateContent(combinedPrompt);
-    const aiReplyText = result.response.text();
+    const aiReplyText =
+      googleResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    // --------------------------------------------------
-    // 4. USAGE TRACKING
-    // --------------------------------------------------
     if (incrementUsage) {
-      try {
-        const now = new Date();
-        const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-
-        await incrementUsage(
-          keyData.user_id,
-          'chat_messages',
-          periodStart,
-          periodEnd
-        );
-      } catch (usageErr) {
-        console.error('Usage tracking failed:', usageErr.message);
-      }
+      await incrementUsage(keyData.user_id, 'chat_messages', new Date(), new Date());
     }
 
-    // --------------------------------------------------
-    // 5. OPENAI-COMPATIBLE RESPONSE
-    // --------------------------------------------------
     res.json({
       id: 'chatcmpl-' + Date.now(),
       object: 'chat.completion',
-      model: agent?.name || targetModelName,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: aiReplyText,
-          },
-          finish_reason: 'stop',
+      model: targetModelName,
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: aiReplyText,
         },
-      ],
+      }],
     });
+
   } catch (err) {
-    console.error('Gemini error:', err);
-    res.status(500).json({
-      error: 'Gemini processing failed',
-      details: err.message,
-    });
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: 'Gemini processing failed' });
   }
 });
 
